@@ -1,4 +1,5 @@
 discord.py==2.3.2
+audioop-lts
 openai>=1.75.0
 requests==2.31.0
 python-dotenv==1.0.1
