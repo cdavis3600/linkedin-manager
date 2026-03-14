@@ -1,0 +1,8 @@
+discord.py==2.3.2
+openai>=1.75.0
+requests==2.31.0
+python-dotenv==1.0.1
+apscheduler==3.10.4
+aiohttp==3.10.5
+aiofiles==23.2.1
+Pillow==10.4.0

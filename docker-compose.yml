@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  linkedin-manager:
+    build: .
+    container_name: linkedin_manager
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist the SQLite database and downloaded media between restarts
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
