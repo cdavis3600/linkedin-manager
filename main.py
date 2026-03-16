@@ -45,8 +45,9 @@ async def main():
     bot = LinkedInBot(post_callback=handle_post_approved)
     register_commands(bot)
 
-    # 3. Create scheduler
+    # 3. Create scheduler and expose it on the bot for Discord commands
     scheduler = create_scheduler(bot)
+    bot.scheduler = scheduler
 
     async with bot:
         await bot.login(config.DISCORD_BOT_TOKEN)

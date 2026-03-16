@@ -22,7 +22,8 @@ from config import config
 from database import (
     init_db, is_post_processed, insert_post,
     save_variants, get_variant, mark_post_status,
-    save_media, update_media_urn
+    save_media, update_media_urn,
+    get_setting, set_setting,
 )
 from linkedin import (
     fetch_recent_org_posts, download_post_media,
@@ -202,22 +203,32 @@ async def run_pipeline(bot):
 # ─────────────────────────────────────────────
 
 def create_scheduler(bot) -> AsyncIOScheduler:
+    # DB overrides take precedence over .env defaults
+    hour = int(get_setting("schedule_hour", str(config.SCHEDULE_HOUR)))
+    minute = int(get_setting("schedule_minute", str(config.SCHEDULE_MINUTE)))
+
     scheduler = AsyncIOScheduler(timezone=config.TIMEZONE)
     scheduler.add_job(
         func=run_pipeline,
         trigger=CronTrigger(
-            hour=config.SCHEDULE_HOUR,
-            minute=config.SCHEDULE_MINUTE,
+            hour=hour,
+            minute=minute,
             timezone=config.TIMEZONE,
         ),
         args=[bot],
         id="linkedin_pipeline",
         name="Daily LinkedIn Post Pipeline",
         replace_existing=True,
-        misfire_grace_time=3600,  # run even if missed by up to 1 hour
+        misfire_grace_time=3600,
     )
-    logger.info(
-        "Scheduler set for %02d:%02d %s",
-        config.SCHEDULE_HOUR, config.SCHEDULE_MINUTE, config.TIMEZONE
-    )
+    logger.info("Scheduler set for %02d:%02d %s", hour, minute, config.TIMEZONE)
     return scheduler
+
+
+def reschedule_pipeline(scheduler: AsyncIOScheduler, hour: int, minute: int):
+    """Change the daily pipeline time at runtime and persist to DB."""
+    trigger = CronTrigger(hour=hour, minute=minute, timezone=config.TIMEZONE)
+    scheduler.reschedule_job("linkedin_pipeline", trigger=trigger)
+    set_setting("schedule_hour", str(hour))
+    set_setting("schedule_minute", str(minute))
+    logger.info("Pipeline rescheduled to %02d:%02d %s", hour, minute, config.TIMEZONE)

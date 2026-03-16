@@ -56,8 +56,32 @@ def init_db():
                 downloaded_at TEXT,
                 FOREIGN KEY (source_post_id) REFERENCES processed_posts(source_post_id)
             );
+
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
     logger.info("Database initialized at %s", config.DB_PATH)
+
+
+def get_setting(key: str, default: str = None) -> Optional[str]:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM bot_settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO bot_settings (key, value, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')""",
+            (key, value, value)
+        )
 
 
 def is_post_processed(source_post_id: str) -> bool:

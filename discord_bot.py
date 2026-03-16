@@ -35,6 +35,40 @@ _LINKEDIN_URL_RE = re.compile(
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_time(text: str) -> tuple[int | None, int | None]:
+    """
+    Parse a user-supplied time string into (hour, minute) in 24h format.
+    Accepts: "14:30", "2:30pm", "2:30 PM", "9am", "09:00".
+    Returns (None, None) on failure.
+    """
+    text = text.strip().lower().replace(" ", "")
+    try:
+        if "am" in text or "pm" in text:
+            is_pm = "pm" in text
+            text = text.replace("am", "").replace("pm", "")
+            if ":" in text:
+                h, m = text.split(":", 1)
+            else:
+                h, m = text, "0"
+            hour, minute = int(h), int(m)
+            if hour == 12:
+                hour = 0 if not is_pm else 12
+            elif is_pm:
+                hour += 12
+        elif ":" in text:
+            h, m = text.split(":", 1)
+            hour, minute = int(h), int(m)
+        else:
+            return None, None
+
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+        return None, None
+    except (ValueError, IndexError):
+        return None, None
+
+
 # Source type display labels
 SOURCE_TYPE_LABELS = {
     "tfg": "🏢 Company Post",
@@ -820,3 +854,43 @@ def register_commands(bot: LinkedInBot):
                 title = f" — {m['title']}" if m.get("title") else ""
                 lines.append(f"  • {m['name']}{title}")
         await ctx.send("**Team roster by department:**" + "\n".join(lines))
+
+    @bot.command(name="schedule")
+    async def schedule_cmd(ctx, *, time_str: str = ""):
+        """
+        !schedule          — show current schedule and next run
+        !schedule 14:30    — change to 2:30 PM (24h format)
+        !schedule 2:30pm   — change to 2:30 PM (12h format)
+        """
+        from scheduler import reschedule_pipeline
+
+        if not time_str.strip():
+            job = bot.scheduler.get_job("linkedin_pipeline")
+            if job and job.next_run_time:
+                next_run = job.next_run_time.strftime("%Y-%m-%d %I:%M %p %Z")
+                current = job.next_run_time.strftime("%I:%M %p")
+                await ctx.send(
+                    f"📅 **Schedule:** daily at **{current}** ({config.TIMEZONE})\n"
+                    f"⏭ **Next run:** {next_run}"
+                )
+            else:
+                await ctx.send("⚠️ No scheduled job found.")
+            return
+
+        hour, minute = _parse_time(time_str.strip())
+        if hour is None:
+            await ctx.send(
+                "⚠️ Couldn't parse that time. Use `HH:MM` (24h) or `H:MMam/pm`.\n"
+                "Examples: `!schedule 14:30` or `!schedule 2:30pm`"
+            )
+            return
+
+        reschedule_pipeline(bot.scheduler, hour, minute)
+
+        job = bot.scheduler.get_job("linkedin_pipeline")
+        next_run = job.next_run_time.strftime("%Y-%m-%d %I:%M %p %Z") if job else "unknown"
+        display = f"{hour:02d}:{minute:02d}"
+        await ctx.send(
+            f"✅ Schedule updated to **{display}** ({config.TIMEZONE})\n"
+            f"⏭ **Next run:** {next_run}"
+        )
