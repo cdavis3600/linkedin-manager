@@ -1,17 +1,20 @@
 """
 linkedin.py — LinkedIn client.
 
-READING  → OpenAI Responses API with web_search (finds posts on LinkedIn)
+READING  → Google CSE finds post URLs + OpenAI reads content (two-step)
+         → Falls back to OpenAI-only web_search if Google CSE not configured
 WRITING  → LinkedIn official API (posts to your personal profile)
 """
 import hashlib
 import json
 import os
 import logging
+import re
 import requests
 import mimetypes
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 from openai import OpenAI
 
@@ -24,15 +27,52 @@ LINKEDIN_BASE_URL = "https://api.linkedin.com/v2"
 
 _openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
 
+_POST_URL_RE = re.compile(
+    r"https?://(?:www\.)?linkedin\.com/"
+    r"(?:posts/|feed/update/urn:li:activity:)"
+)
+
+_ACTIVITY_ID_RE = re.compile(r"activity[:-](\d+)")
+_UGCPOST_ID_RE = re.compile(r"ugcPost[:-](\d+)")
+
+LINKEDIN_REST_URL = "https://api.linkedin.com/rest"
+
+# Used when we already have a specific post URL (from Google CSE or user paste)
+READ_POST_PROMPT = """\
+Visit this LinkedIn post: {post_url}
+
+Read the FULL text of the post. Return ONLY a JSON object (no markdown fences, \
+no commentary) with these keys:
+- "post_text": the full text of the post (preserve line breaks)
+- "post_url": "{post_url}"
+- "author_name": the name of the person or company who wrote it
+- "post_date": the date of the post in ISO 8601 format (YYYY-MM-DD), or null if unknown
+
+If the post cannot be read, return: {{"post_text": null}}
+"""
+
+# Fallback: used when Google CSE is not configured
 FETCH_PROMPT = """\
-Visit the LinkedIn profile at {linkedin_url} and find the most recent post \
-published by this person or company.
+Today is {today}. Visit the LinkedIn profile at {linkedin_url} and find the \
+MOST RECENT post published by this person or company. It should be from the \
+last 1-2 days. Do NOT return older posts if a newer one exists.
+
+CRITICAL — you MUST return the direct URL to the SPECIFIC post, not the \
+profile or company page URL. The URL must contain "activity-" or "ugcPost-" \
+followed by a numeric ID.
+
+Correct post URL examples:
+  https://www.linkedin.com/posts/username_topic-activity-7430263630484480000-XXXX
+  https://www.linkedin.com/posts/username_topic-ugcPost-7434979636482101250-XXXX
+  https://www.linkedin.com/feed/update/urn:li:activity:7430263630484480000/
+
+WRONG (do NOT return these):
+  https://www.linkedin.com/company/the-famous-group/
+  https://www.linkedin.com/in/someone/
 
 Return ONLY a JSON object (no markdown fences, no commentary) with these keys:
 - "post_text": the full text of the post (preserve line breaks)
-- "post_url": the direct URL to the SPECIFIC post on LinkedIn. This should be \
-the activity URL (e.g. https://www.linkedin.com/posts/username_topic-activity-1234567890/) \
-NOT the profile page URL. Look for the share/activity link for this particular post.
+- "post_url": the direct URL to the specific post (must contain activity- or ugcPost-)
 - "author_name": the name of the person or company
 - "post_date": the date of the post in ISO 8601 format (YYYY-MM-DD), or null if unknown
 
@@ -48,18 +88,132 @@ def _li_headers() -> dict:
     }
 
 
+def _is_specific_post_url(url: str) -> bool:
+    """True if the URL points to a specific LinkedIn post (not a profile/company page)."""
+    return bool(_ACTIVITY_ID_RE.search(url) or _UGCPOST_ID_RE.search(url))
+
+
+def _extract_slug(linkedin_url: str) -> str:
+    """
+    Extract the LinkedIn slug from a profile or company page URL.
+    /company/the-famous-group/ → the-famous-group
+    /in/jacob-woerther/        → jacob-woerther
+    """
+    path = urlparse(linkedin_url).path.strip("/")
+    parts = path.split("/")
+    if len(parts) >= 2:
+        return parts[-1]
+    return parts[0] if parts else ""
+
+
 # ─────────────────────────────────────────────
-#  Fetch posts via OpenAI web search
+#  Step 1: Google CSE — find the latest post URL
 # ─────────────────────────────────────────────
 
-def fetch_posts_from_url(linkedin_url: str, hours_back: int = 24) -> list[dict]:
+def _google_find_latest_post(linkedin_url: str) -> Optional[str]:
     """
-    Fetch the most recent post from a LinkedIn profile or company page
-    using OpenAI's Responses API with web search.
+    Use Google Custom Search API to find the most recent LinkedIn post
+    from a profile or company page. Returns a post URL or None.
+    """
+    if not config.GOOGLE_CSE_API_KEY or not config.GOOGLE_CSE_ID:
+        return None
 
-    Returns a list with 0 or 1 post dicts matching the pipeline's expected shape.
+    slug = _extract_slug(linkedin_url)
+    if not slug:
+        logger.warning("Could not extract slug from %s", linkedin_url)
+        return None
+
+    query = f"site:linkedin.com/posts/{slug}"
+    logger.info("Google CSE search: %s", query)
+
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={
+                "key": config.GOOGLE_CSE_API_KEY,
+                "cx": config.GOOGLE_CSE_ID,
+                "q": query,
+                "dateRestrict": "w1",
+                "num": 5,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.error("Google CSE request failed: %s", e)
+        return None
+
+    items = data.get("items", [])
+    if not items:
+        logger.info("Google CSE returned no results for: %s", query)
+        return None
+
+    for item in items:
+        link = item.get("link", "")
+        if _POST_URL_RE.search(link) and _is_specific_post_url(link):
+            clean_url = link.split("?")[0]
+            logger.info("Google CSE found post: %s", clean_url)
+            return clean_url
+
+    logger.info("Google CSE results didn't contain a valid post URL for: %s", query)
+    return None
+
+
+# ─────────────────────────────────────────────
+#  Step 2: OpenAI — read content from a known URL
+# ─────────────────────────────────────────────
+
+def _openai_read_post(post_url: str) -> Optional[dict]:
     """
-    prompt = FETCH_PROMPT.format(linkedin_url=linkedin_url)
+    Use OpenAI web search to read the content of a specific LinkedIn post URL.
+    Returns parsed JSON dict or None.
+    """
+    prompt = READ_POST_PROMPT.format(post_url=post_url)
+
+    try:
+        response = _openai_client.responses.create(
+            model=config.OPENAI_MODEL,
+            tools=[{"type": "web_search"}],
+            input=prompt,
+        )
+    except Exception as e:
+        logger.error("OpenAI read-post failed for %s: %s", post_url, e)
+        return None
+
+    raw_text = _extract_response_text(response)
+    if not raw_text:
+        logger.warning("Empty OpenAI response when reading %s", post_url)
+        return None
+
+    try:
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        data = json.loads(cleaned)
+    except (json.JSONDecodeError, IndexError) as e:
+        logger.error("Failed to parse JSON from OpenAI for %s: %s\nRaw: %s",
+                      post_url, e, raw_text[:500])
+        return None
+
+    if not data.get("post_text"):
+        return None
+
+    data["post_url"] = post_url
+    return data
+
+
+# ─────────────────────────────────────────────
+#  Fallback: OpenAI-only search+read (original method)
+# ─────────────────────────────────────────────
+
+def _openai_search_and_read(linkedin_url: str) -> Optional[tuple[dict, object]]:
+    """
+    Original single-step approach: ask OpenAI to find AND read the latest post.
+    Returns (parsed_data, response_obj) or None.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    prompt = FETCH_PROMPT.format(linkedin_url=linkedin_url, today=today)
 
     try:
         response = _openai_client.responses.create(
@@ -69,12 +223,12 @@ def fetch_posts_from_url(linkedin_url: str, hours_back: int = 24) -> list[dict]:
         )
     except Exception as e:
         logger.error("OpenAI web search failed for %s: %s", linkedin_url, e)
-        return []
+        return None
 
     raw_text = _extract_response_text(response)
     if not raw_text:
         logger.warning("Empty response from OpenAI for %s", linkedin_url)
-        return []
+        return None
 
     try:
         cleaned = raw_text.strip()
@@ -82,24 +236,70 @@ def fetch_posts_from_url(linkedin_url: str, hours_back: int = 24) -> list[dict]:
             cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         data = json.loads(cleaned)
     except (json.JSONDecodeError, IndexError) as e:
-        logger.error("Failed to parse JSON from OpenAI response for %s: %s\nRaw: %s",
+        logger.error("Failed to parse JSON from OpenAI for %s: %s\nRaw: %s",
                       linkedin_url, e, raw_text[:500])
-        return []
+        return None
 
-    post_text = data.get("post_text")
-    if not post_text:
-        logger.info("No post found by OpenAI for %s", linkedin_url)
-        return []
+    if not data.get("post_text"):
+        return None
 
     citation_url = _extract_post_url_from_citations(response)
     json_url = data.get("post_url") or ""
     if citation_url:
-        post_url = citation_url
+        data["post_url"] = citation_url
     elif json_url and _POST_URL_RE.search(json_url):
-        post_url = json_url.split("?")[0]
+        data["post_url"] = json_url.split("?")[0]
     else:
-        post_url = linkedin_url
+        data["post_url"] = linkedin_url
+        logger.warning(
+            "No specific post URL found for %s — falling back to profile URL. "
+            "Reshare will not be available for this post.", linkedin_url
+        )
 
+    return (data, response)
+
+
+# ─────────────────────────────────────────────
+#  Main entry point: fetch posts from URL
+# ─────────────────────────────────────────────
+
+def fetch_posts_from_url(linkedin_url: str, hours_back: int = 24) -> list[dict]:
+    """
+    Fetch the most recent post from a LinkedIn profile or company page.
+
+    Strategy:
+      1. If URL is already a specific post → read it directly with OpenAI
+      2. If Google CSE is configured → find URL via Google, then read with OpenAI
+      3. Fallback → original OpenAI search+read in one step
+    """
+    data = None
+
+    if _is_specific_post_url(linkedin_url):
+        logger.info("URL is a specific post, reading directly: %s", linkedin_url[:80])
+        data = _openai_read_post(linkedin_url)
+    elif config.GOOGLE_CSE_API_KEY and config.GOOGLE_CSE_ID:
+        post_url = _google_find_latest_post(linkedin_url)
+        if post_url:
+            logger.info("Google CSE found post, reading with OpenAI: %s", post_url[:80])
+            data = _openai_read_post(post_url)
+        else:
+            logger.info("Google CSE found nothing for %s, falling back to OpenAI search",
+                        linkedin_url[:60])
+            result = _openai_search_and_read(linkedin_url)
+            if result:
+                data = result[0]
+    else:
+        logger.info("Google CSE not configured, using OpenAI search for %s", linkedin_url[:60])
+        result = _openai_search_and_read(linkedin_url)
+        if result:
+            data = result[0]
+
+    if not data:
+        logger.info("No post found for %s", linkedin_url)
+        return []
+
+    post_text = data.get("post_text", "")
+    post_url = data.get("post_url", linkedin_url)
     author = data.get("author_name") or ""
     post_date_str = data.get("post_date") or ""
 
@@ -135,19 +335,6 @@ def _extract_response_text(response) -> Optional[str]:
                 if block.type == "output_text":
                     return block.text
     return None
-
-
-import re
-
-_POST_URL_RE = re.compile(
-    r"https?://(?:www\.)?linkedin\.com/"
-    r"(?:posts/|feed/update/urn:li:activity:)"
-)
-
-_ACTIVITY_ID_RE = re.compile(r"activity[:-](\d+)")
-_UGCPOST_ID_RE = re.compile(r"ugcPost[:-](\d+)")
-
-LINKEDIN_REST_URL = "https://api.linkedin.com/rest"
 
 
 def _extract_post_url_from_citations(response) -> Optional[str]:

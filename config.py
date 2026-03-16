@@ -150,6 +150,10 @@ class Config:
     TEAM_MEMBERS: list        # list of dicts: {name, title, department, linkedin_url}
     DEPARTMENT_GROUPS: dict   # department → list of member dicts (compound depts expanded)
 
+    # Google Custom Search (for LinkedIn post discovery)
+    GOOGLE_CSE_API_KEY: str = os.getenv("GOOGLE_CSE_API_KEY", "")
+    GOOGLE_CSE_ID: str = os.getenv("GOOGLE_CSE_ID", "")
+
     # OpenAI
     OPENAI_API_KEY: str = _require("OPENAI_API_KEY")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
