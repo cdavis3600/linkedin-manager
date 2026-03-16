@@ -91,8 +91,8 @@ SCOPES = "openid profile email w_member_social"
 ### Error: No posts found
 - Check `SOURCE_LINKEDIN_URLS` in `.env` — must have type prefix and full URL
 - Check `OPENAI_API_KEY` is valid and has credits
-- If `GOOGLE_CSE_API_KEY` and `GOOGLE_CSE_ID` are set, Google Custom Search finds post URLs first
-- Falls back to OpenAI Responses API with `web_search` if Google CSE is not configured
+- If `BRAVE_SEARCH_API_KEY` is set, Brave Search finds post URLs first
+- Falls back to OpenAI Responses API with `web_search` if Brave is not configured
 
 ### Discord message not appearing
 - Make sure you sent the bot a DM first (to open the thread)
@@ -106,7 +106,7 @@ SCOPES = "openid profile email w_member_social"
 |---|---|---|
 | `.env` | All credentials and settings | Adding new source URLs, changing schedule, editing team |
 | `config.py` | Loads `.env` into Python | Adding new config variables |
-| `linkedin.py` | Google CSE + OpenAI post fetch + LinkedIn post | Fetch prompt or posting changes |
+| `linkedin.py` | Brave Search + OpenAI post fetch + LinkedIn post | Fetch prompt or posting changes |
 | `rewriter.py` | GPT-4 voice profile + post generation | Changing CJ's voice or type instructions |
 | `discord_bot.py` | Approval UI, team tagging, buttons | Adding new approval options |
 | `scheduler.py` | Pipeline logic | Changing what happens at run time |

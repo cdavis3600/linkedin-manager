@@ -1,8 +1,8 @@
 """
 linkedin.py — LinkedIn client.
 
-READING  → Google CSE finds post URLs + OpenAI reads content (two-step)
-         → Falls back to OpenAI-only web_search if Google CSE not configured
+READING  → Brave Search finds post URLs + OpenAI reads content (two-step)
+         → Falls back to OpenAI-only web_search if Brave not configured
 WRITING  → LinkedIn official API (posts to your personal profile)
 """
 import hashlib
@@ -37,7 +37,7 @@ _UGCPOST_ID_RE = re.compile(r"ugcPost[:-](\d+)")
 
 LINKEDIN_REST_URL = "https://api.linkedin.com/rest"
 
-# Used when we already have a specific post URL (from Google CSE or user paste)
+# Used when we already have a specific post URL (from Brave Search or user paste)
 READ_POST_PROMPT = """\
 Visit this LinkedIn post: {post_url}
 
@@ -51,7 +51,7 @@ no commentary) with these keys:
 If the post cannot be read, return: {{"post_text": null}}
 """
 
-# Fallback: used when Google CSE is not configured
+# Fallback: used when Brave Search is not configured
 FETCH_PROMPT = """\
 Today is {today}. Visit the LinkedIn profile at {linkedin_url} and find the \
 MOST RECENT post published by this person or company. It should be from the \
@@ -107,15 +107,15 @@ def _extract_slug(linkedin_url: str) -> str:
 
 
 # ─────────────────────────────────────────────
-#  Step 1: Google CSE — find the latest post URL
+#  Step 1: Brave Search — find the latest post URL
 # ─────────────────────────────────────────────
 
-def _google_find_latest_post(linkedin_url: str) -> Optional[str]:
+def _brave_find_latest_post(linkedin_url: str) -> Optional[str]:
     """
-    Use Google Custom Search API to find the most recent LinkedIn post
+    Use Brave Search API to find the most recent LinkedIn post
     from a profile or company page. Returns a post URL or None.
     """
-    if not config.GOOGLE_CSE_API_KEY or not config.GOOGLE_CSE_ID:
+    if not config.BRAVE_SEARCH_API_KEY:
         return None
 
     slug = _extract_slug(linkedin_url)
@@ -124,39 +124,42 @@ def _google_find_latest_post(linkedin_url: str) -> Optional[str]:
         return None
 
     query = f"site:linkedin.com/posts/{slug}"
-    logger.info("Google CSE search: %s", query)
+    logger.info("Brave Search: %s", query)
 
     try:
         resp = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
+            "https://api.search.brave.com/res/v1/web/search",
             params={
-                "key": config.GOOGLE_CSE_API_KEY,
-                "cx": config.GOOGLE_CSE_ID,
                 "q": query,
-                "dateRestrict": "w1",
-                "num": 5,
+                "count": 5,
+                "freshness": "pw",
+            },
+            headers={
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": config.BRAVE_SEARCH_API_KEY,
             },
             timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        logger.error("Google CSE request failed: %s", e)
+        logger.error("Brave Search request failed: %s", e)
         return None
 
-    items = data.get("items", [])
-    if not items:
-        logger.info("Google CSE returned no results for: %s", query)
+    results = data.get("web", {}).get("results", [])
+    if not results:
+        logger.info("Brave Search returned no results for: %s", query)
         return None
 
-    for item in items:
-        link = item.get("link", "")
+    for result in results:
+        link = result.get("url", "")
         if _POST_URL_RE.search(link) and _is_specific_post_url(link):
             clean_url = link.split("?")[0]
-            logger.info("Google CSE found post: %s", clean_url)
+            logger.info("Brave Search found post: %s", clean_url)
             return clean_url
 
-    logger.info("Google CSE results didn't contain a valid post URL for: %s", query)
+    logger.info("Brave Search results didn't contain a valid post URL for: %s", query)
     return None
 
 
@@ -269,7 +272,7 @@ def fetch_posts_from_url(linkedin_url: str, hours_back: int = 24) -> list[dict]:
 
     Strategy:
       1. If URL is already a specific post → read it directly with OpenAI
-      2. If Google CSE is configured → find URL via Google, then read with OpenAI
+      2. If Brave Search is configured → find URL via Brave, then read with OpenAI
       3. Fallback → original OpenAI search+read in one step
     """
     data = None
@@ -277,19 +280,19 @@ def fetch_posts_from_url(linkedin_url: str, hours_back: int = 24) -> list[dict]:
     if _is_specific_post_url(linkedin_url):
         logger.info("URL is a specific post, reading directly: %s", linkedin_url[:80])
         data = _openai_read_post(linkedin_url)
-    elif config.GOOGLE_CSE_API_KEY and config.GOOGLE_CSE_ID:
-        post_url = _google_find_latest_post(linkedin_url)
+    elif config.BRAVE_SEARCH_API_KEY:
+        post_url = _brave_find_latest_post(linkedin_url)
         if post_url:
-            logger.info("Google CSE found post, reading with OpenAI: %s", post_url[:80])
+            logger.info("Brave found post, reading with OpenAI: %s", post_url[:80])
             data = _openai_read_post(post_url)
         else:
-            logger.info("Google CSE found nothing for %s, falling back to OpenAI search",
+            logger.info("Brave found nothing for %s, falling back to OpenAI search",
                         linkedin_url[:60])
             result = _openai_search_and_read(linkedin_url)
             if result:
                 data = result[0]
     else:
-        logger.info("Google CSE not configured, using OpenAI search for %s", linkedin_url[:60])
+        logger.info("Brave Search not configured, using OpenAI search for %s", linkedin_url[:60])
         result = _openai_search_and_read(linkedin_url)
         if result:
             data = result[0]
