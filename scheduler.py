@@ -2,11 +2,12 @@
 scheduler.py — Core pipeline logic + APScheduler setup.
 
 Pipeline (runs daily at configured time):
-  1. Fetch recent org posts from LinkedIn
+  1. Fetch recent posts from all source URLs (with source_type per URL)
   2. Deduplicate against DB
   3. Download media
-  4. Generate AI variants via GPT-4
-  5. Send Discord approval message
+  4. Select/synthesize best post topic (GPT-4)
+  5. Generate ONE AI post in CJ's voice (tuned to source_type)
+  6. Send Discord approval message
 """
 import asyncio
 import logging
@@ -27,7 +28,7 @@ from linkedin import (
     fetch_recent_org_posts, download_post_media,
     upload_image_to_linkedin, post_to_linkedin
 )
-from rewriter import generate_variants, generate_approval_summary, select_and_synthesize
+from rewriter import generate_post, generate_approval_summary, select_and_synthesize
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ async def run_pipeline(bot):
     """Main pipeline: fetch all → dedupe → analyze/synthesize → one daily approval."""
     logger.info("=== Pipeline starting at %s ===", datetime.now(timezone.utc).isoformat())
 
-    # 1. Fetch recent posts from all source URLs
+    # 1. Fetch recent posts from all source URLs (source_type attached per URL)
     posts = await asyncio.get_event_loop().run_in_executor(
         None, fetch_recent_org_posts
     )
@@ -125,14 +126,17 @@ async def run_pipeline(bot):
         logger.warning("Topic analysis returned empty source_text. Skipping.")
         return
 
+    source_type = selection.get("source_type", "inspiration")
     post_urls = selection.get("post_urls", [])
     author_names = selection.get("author_names", [])
     mode = selection.get("mode", "single")
-    logger.info("Topic analysis: mode=%s, sources=%d", mode, len(post_urls))
+    logger.info(
+        "Topic analysis: mode=%s, type=%s, sources=%d",
+        mode, source_type, len(post_urls)
+    )
 
     # Build a tracking ID — reuse the individual post ID for single mode,
     # or create a composite key for synthesized posts.
-    new_post_ids = {p["id"] for p in new_posts}
     if mode == "single" and len(new_posts) == 1:
         composite_id = new_posts[0]["id"]
     else:
@@ -151,22 +155,26 @@ async def run_pipeline(bot):
             )
             local_media.extend(media)
 
-    # 5. Generate AI variants — use source_urls (profile pages) for credit links
+    # 5. Generate ONE AI post in CJ's voice, tuned to source_type
     source_urls = list({p["source_url"] for p in new_posts if p.get("source_url")})
-    logger.info("Generating AI variants...")
-    variants = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: generate_variants(
+    logger.info("Generating post (type=%s)...", source_type)
+
+    post_text = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: generate_post(
             source_text,
+            source_type=source_type,
             post_urls=post_urls,
             author_names=author_names,
             source_urls=source_urls,
         )
     )
+
     summary = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: generate_approval_summary(source_text, variants.get("personal", ""))
+        None, lambda: generate_approval_summary(source_text, post_text)
     )
 
-    save_variants(composite_id, variants)
+    # Save single "post" variant
+    save_variants(composite_id, {"post": post_text})
 
     # 6. Send ONE Discord approval message
     from discord_bot import send_approval_message
@@ -175,7 +183,8 @@ async def run_pipeline(bot):
             bot=bot,
             source_post_id=composite_id,
             source_text=source_text,
-            variants=variants,
+            post_text=post_text,
+            source_type=source_type,
             summary=summary,
             media_count=len(local_media),
             source_urls=post_urls,

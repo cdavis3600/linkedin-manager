@@ -163,12 +163,16 @@ def fetch_recent_org_posts(hours_back: int = 24) -> list[dict]:
     """
     Fetch posts from all SOURCE_LINKEDIN_URLS configured in .env.
     Supports any mix of company pages and personal profiles.
+    Attaches source_type to each returned post dict.
     """
     all_posts = []
-    for url in config.SOURCE_LINKEDIN_URLS:
-        url = url.strip()
+    for entry in config.SOURCE_URLS_WITH_TYPES:
+        url = entry["url"].strip()
+        source_type = entry.get("source_type", "inspiration")
         if url:
             posts = fetch_posts_from_url(url, hours_back=hours_back)
+            for p in posts:
+                p["source_type"] = source_type
             all_posts.extend(posts)
     return all_posts[:config.MAX_POSTS_PER_RUN]
 
