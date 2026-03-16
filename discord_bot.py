@@ -176,12 +176,14 @@ class TeamTagView(discord.ui.View):
         post_text: str,
         on_post: Callable[[str, str], Awaitable[None]],
         parent_view: "ApprovalView",
+        source_urls: list[str] | None = None,
     ):
         super().__init__(timeout=3600 * 12)
         self.source_post_id = source_post_id
         self.post_text = post_text
         self.on_post = on_post
         self.parent_view = parent_view
+        self.source_urls = source_urls or []
         self.dept_selected_names: set[str] = set()
         self.individual_selected_names: set[str] = set()
 
@@ -189,6 +191,14 @@ class TeamTagView(discord.ui.View):
             self.add_item(DepartmentSelect(config.DEPARTMENT_GROUPS, row=0))
         if config.TEAM_MEMBERS:
             self.add_item(IndividualSelect(config.TEAM_MEMBERS, row=1))
+
+        from linkedin import extract_share_urn
+        self._share_urn = None
+        for url in self.source_urls:
+            urn = extract_share_urn(url)
+            if urn:
+                self._share_urn = urn
+                break
 
     def _all_selected_names(self) -> list[str]:
         """Union of department and individual selections, preserving roster order."""
@@ -247,6 +257,170 @@ class TeamTagView(discord.ui.View):
         self.individual_selected_names = set()
         await self._post(interaction)
 
+    @discord.ui.button(label="🔄 Reshare", style=discord.ButtonStyle.primary, row=2)
+    async def reshare(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._share_urn:
+            await interaction.response.send_message(
+                "⚠️ No reshare URN found for this post. Use Post Now instead.",
+                ephemeral=True,
+            )
+            return
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+
+        from rewriter import strip_credit_line
+        from linkedin import reshare_to_linkedin
+
+        clean_text = strip_credit_line(self._build_final_text())
+        self.parent_view.acted = True
+        mark_post_status(self.source_post_id, "approved", approved_variant="post")
+
+        await interaction.response.send_message(
+            f"🔄 Resharing to LinkedIn...", ephemeral=False
+        )
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: reshare_to_linkedin(clean_text, self._share_urn)
+        )
+        if result:
+            mark_post_status(self.source_post_id, "posted", posted_urn=result)
+            await interaction.followup.send("✅ Reshared to LinkedIn successfully.")
+        else:
+            mark_post_status(self.source_post_id, "failed")
+            await interaction.followup.send(
+                "❌ Reshare failed. Try **Post Now** instead for a standalone post."
+            )
+
+
+# ─────────────────────────────────────────────
+#  Auto-reshare helper (used for TFG posts)
+# ─────────────────────────────────────────────
+
+async def _auto_reshare(
+    interaction: discord.Interaction,
+    source_post_id: str,
+    post_text: str,
+    source_urls: list[str],
+    parent_view,
+) -> bool:
+    """
+    Attempt to reshare automatically. Returns True if reshare succeeded or
+    was attempted (interaction consumed). Returns False if no URN found
+    (interaction NOT consumed — caller should fall back to PostActionView).
+    """
+    from linkedin import extract_share_urn, reshare_to_linkedin
+    from rewriter import strip_credit_line
+
+    share_urn = None
+    for url in (source_urls or []):
+        urn = extract_share_urn(url)
+        if urn:
+            share_urn = urn
+            break
+
+    if not share_urn:
+        return False
+
+    clean_text = strip_credit_line(post_text)
+    parent_view.acted = True
+    mark_post_status(source_post_id, "approved", approved_variant="post")
+
+    await interaction.response.send_message("🔄 Resharing to LinkedIn...", ephemeral=False)
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: reshare_to_linkedin(clean_text, share_urn)
+    )
+    if result:
+        mark_post_status(source_post_id, "posted", posted_urn=result)
+        await interaction.followup.send("✅ Reshared to LinkedIn successfully.")
+    else:
+        mark_post_status(source_post_id, "failed")
+        await interaction.followup.send(
+            "❌ Auto-reshare failed. Use `!inspire` to try again, or Post Now for a standalone post."
+        )
+    return True
+
+
+# ─────────────────────────────────────────────
+#  Post Action View (Post Now / Reshare — no tagging)
+# ─────────────────────────────────────────────
+
+class PostActionView(discord.ui.View):
+    """Simple post/reshare choice shown after approval (tagging disabled)."""
+
+    def __init__(
+        self,
+        source_post_id: str,
+        post_text: str,
+        on_post: Callable[[str, str], Awaitable[None]],
+        parent_view: "ApprovalView",
+        source_urls: list[str] | None = None,
+    ):
+        super().__init__(timeout=3600 * 12)
+        self.source_post_id = source_post_id
+        self.post_text = post_text
+        self.on_post = on_post
+        self.parent_view = parent_view
+        self.source_urls = source_urls or []
+
+        from linkedin import extract_share_urn
+        self._share_urn = None
+        for url in self.source_urls:
+            urn = extract_share_urn(url)
+            if urn:
+                self._share_urn = urn
+                break
+
+    @discord.ui.button(label="📤 Post Now", style=discord.ButtonStyle.success, row=0)
+    async def post_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+
+        update_variant(self.source_post_id, "post", self.post_text)
+        self.parent_view.acted = True
+        mark_post_status(self.source_post_id, "approved", approved_variant="post")
+
+        await interaction.response.send_message("🚀 Posting to LinkedIn...", ephemeral=False)
+        result = await self.on_post(self.source_post_id, "post")
+        if result:
+            await interaction.followup.send("✅ Posted to LinkedIn successfully.")
+        else:
+            await interaction.followup.send("❌ Failed to post to LinkedIn. Check logs.")
+
+    @discord.ui.button(label="🔄 Reshare", style=discord.ButtonStyle.primary, row=0)
+    async def reshare(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._share_urn:
+            await interaction.response.send_message(
+                "⚠️ No reshare URN found for this post. Use Post Now instead.",
+                ephemeral=True,
+            )
+            return
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+
+        from rewriter import strip_credit_line
+        from linkedin import reshare_to_linkedin
+
+        clean_text = strip_credit_line(self.post_text)
+        self.parent_view.acted = True
+        mark_post_status(self.source_post_id, "approved", approved_variant="post")
+
+        await interaction.response.send_message("🔄 Resharing to LinkedIn...", ephemeral=False)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: reshare_to_linkedin(clean_text, self._share_urn)
+        )
+        if result:
+            mark_post_status(self.source_post_id, "posted", posted_urn=result)
+            await interaction.followup.send("✅ Reshared to LinkedIn successfully.")
+        else:
+            mark_post_status(self.source_post_id, "failed")
+            await interaction.followup.send(
+                "❌ Reshare failed. Try **Post Now** instead for a standalone post."
+            )
+
 
 # ─────────────────────────────────────────────
 #  Regenerate Modal + Confirm View
@@ -267,6 +441,7 @@ class RegenerateModal(discord.ui.Modal, title="Regenerate Post"):
         source_type: str,
         on_post: Callable,
         parent_view: "ApprovalView",
+        source_urls: list[str] | None = None,
     ):
         super().__init__()
         self.source_post_id = source_post_id
@@ -274,6 +449,7 @@ class RegenerateModal(discord.ui.Modal, title="Regenerate Post"):
         self.source_type = source_type
         self.on_post = on_post
         self.parent_view = parent_view
+        self.source_urls = source_urls or []
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -302,18 +478,21 @@ class RegenerateModal(discord.ui.Modal, title="Regenerate Post"):
             source_type=self.source_type,
             on_post=self.on_post,
             parent_view=self.parent_view,
+            source_urls=self.source_urls,
         )
         await interaction.followup.send(embed=embed, view=confirm_view)
 
 
 class ConfirmRegeneratedView(discord.ui.View):
-    def __init__(self, source_post_id, new_text, source_type, on_post, parent_view):
+    def __init__(self, source_post_id, new_text, source_type, on_post, parent_view,
+                 source_urls=None):
         super().__init__(timeout=3600 * 12)
         self.source_post_id = source_post_id
         self.new_text = new_text
         self.source_type = source_type
         self.on_post = on_post
         self.parent_view = parent_view
+        self.source_urls = source_urls or []
 
     @discord.ui.button(label="✅ Approve This", style=discord.ButtonStyle.success)
     async def approve_this(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -321,23 +500,27 @@ class ConfirmRegeneratedView(discord.ui.View):
             item.disabled = True
         await interaction.message.edit(view=self)
 
-        tag_view = TeamTagView(
+        # TFG posts auto-reshare
+        if self.source_type == "tfg":
+            reshare_result = await _auto_reshare(
+                interaction, self.source_post_id, self.new_text,
+                self.source_urls, self.parent_view,
+            )
+            if reshare_result:
+                return
+
+        action_view = PostActionView(
             source_post_id=self.source_post_id,
             post_text=self.new_text,
             on_post=self.on_post,
             parent_view=self.parent_view,
+            source_urls=self.source_urls,
         )
-
-        if config.TEAM_MEMBERS:
-            await interaction.response.send_message(
-                "👥 **Who should be tagged?** (optional — select and hit Post Now)",
-                view=tag_view,
-                ephemeral=False,
-            )
-        else:
-            # No team configured — go straight to post
-            tag_view.selected_tags = []
-            await tag_view._post(interaction)
+        await interaction.response.send_message(
+            "**How do you want to publish?**",
+            view=action_view,
+            ephemeral=False,
+        )
 
     @discord.ui.button(label="🔄 Regenerate Again", style=discord.ButtonStyle.secondary)
     async def regen_again(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -348,6 +531,7 @@ class ConfirmRegeneratedView(discord.ui.View):
                 source_type=self.source_type,
                 on_post=self.on_post,
                 parent_view=self.parent_view,
+                source_urls=self.source_urls,
             )
         )
 
@@ -372,12 +556,14 @@ class ApprovalView(discord.ui.View):
         source_type: str,
         on_post_callback: Callable[[str, str], Awaitable[None]],
         timeout: float = 3600 * 12,
+        source_urls: list[str] | None = None,
     ):
         super().__init__(timeout=timeout)
         self.source_post_id = source_post_id
         self.source_text = source_text
         self.source_type = source_type
         self.on_post = on_post_callback
+        self.source_urls = source_urls or []
         self.acted = False
 
     async def _disable_all(self, interaction: discord.Interaction):
@@ -400,34 +586,27 @@ class ApprovalView(discord.ui.View):
 
         await self._disable_all(interaction)
 
-        tag_view = TeamTagView(
+        # TFG posts auto-reshare (always a repost with CJ's commentary)
+        if self.source_type == "tfg":
+            reshare_result = await _auto_reshare(
+                interaction, self.source_post_id, post_text,
+                self.source_urls, self,
+            )
+            if reshare_result:
+                return
+
+        action_view = PostActionView(
             source_post_id=self.source_post_id,
             post_text=post_text,
             on_post=self.on_post,
             parent_view=self,
+            source_urls=self.source_urls,
         )
-
-        if config.TEAM_MEMBERS:
-            await interaction.response.send_message(
-                "👥 **Who should be tagged?** (optional — select and hit Post Now)",
-                view=tag_view,
-                ephemeral=False,
-            )
-        else:
-            # No team configured — go straight to post
-            await interaction.response.send_message(
-                "🚀 Posting to LinkedIn...", ephemeral=False
-            )
-            self.acted = True
-            update_variant(self.source_post_id, "post", post_text)
-            mark_post_status(self.source_post_id, "approved", approved_variant="post")
-            result = await self.on_post(self.source_post_id, "post")
-            if result:
-                await interaction.followup.send("✅ Posted to LinkedIn successfully.")
-            else:
-                await interaction.followup.send(
-                    "❌ Failed to post to LinkedIn. Check logs for details."
-                )
+        await interaction.response.send_message(
+            "**How do you want to publish?**",
+            view=action_view,
+            ephemeral=False,
+        )
 
     @discord.ui.button(label="✏️ Regenerate", style=discord.ButtonStyle.secondary, row=0)
     async def regenerate(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -441,6 +620,7 @@ class ApprovalView(discord.ui.View):
                 source_type=self.source_type,
                 on_post=self.on_post,
                 parent_view=self,
+                source_urls=self.source_urls,
             )
         )
 
@@ -609,6 +789,7 @@ async def send_approval_message(
         source_text=source_text,
         source_type=source_type,
         on_post_callback=bot.post_callback,
+        source_urls=source_urls,
     )
 
     msg = await channel.send(embed=embed, view=view)

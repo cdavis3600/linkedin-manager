@@ -10,6 +10,7 @@ One output only — no variant carousel.
 """
 import json
 import logging
+import re
 from openai import OpenAI
 
 from config import config
@@ -69,7 +70,8 @@ Voice rules — follow these precisely:
 - Emojis: use 0-2 max, only when they add energy (🚀 for something exciting, ✅ for confirmation)
 - Hashtags: 3-5 MAX, relevant only. No spam.
 - Do NOT plagiarise source content — add CJ's perspective and angle
-- Do NOT include any source URLs or credit lines — those get appended separately"""
+- Do NOT include any source URLs or credit lines — those get appended separately
+- NEVER use em dashes (\u2014). Use regular dashes (-) or rewrite the sentence instead."""
 
 
 # ─────────────────────────────────────────────
@@ -241,7 +243,7 @@ Write only the post text. No preamble, no explanation, no title."""
             temperature=0.75,
             max_tokens=400,
         )
-        post_text = response.choices[0].message.content.strip()
+        post_text = _sanitize_text(response.choices[0].message.content.strip())
         logger.info("Generated %s post (%d chars)", source_type, len(post_text))
     except Exception as e:
         logger.error("OpenAI error: %s", e)
@@ -257,6 +259,18 @@ Write only the post text. No preamble, no explanation, no title."""
             post_text = post_text.rstrip() + "\n\n" + credit_line
 
     return post_text
+
+
+def _sanitize_text(text: str) -> str:
+    """Replace em dashes and other unwanted characters."""
+    return text.replace("\u2014", "-").replace("\u2013", "-")
+
+
+def strip_credit_line(text: str) -> str:
+    """Remove the trailing 'Via ...' or 'Inspired by:' credit block."""
+    text = re.sub(r"\n\nVia [^\n]+$", "", text.rstrip())
+    text = re.sub(r"\n\nInspired by:\n.*", "", text.rstrip(), flags=re.DOTALL)
+    return text.rstrip()
 
 
 def _build_credit_line(urls: list[str], names: list[str]) -> str:
@@ -306,7 +320,7 @@ Rewrite incorporating this feedback. Write only the post text."""
             temperature=0.8,
             max_tokens=400,
         )
-        return response.choices[0].message.content.strip()
+        return _sanitize_text(response.choices[0].message.content.strip())
     except Exception as e:
         logger.error("OpenAI regeneration error: %s", e)
         return current_text

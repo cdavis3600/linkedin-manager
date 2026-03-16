@@ -13,3 +13,7 @@
 **DM shortcut:** Send the bot a LinkedIn URL via DM (no command needed) to auto-generate a post. Add commentary alongside the URL to hint at your angle.
 
 **Scheduled pipeline:** Runs daily at the configured time and sends an approval to your Discord channel automatically.
+
+**Post types:**
+- **TFG** (company posts) -- auto-reshare on Approve (repost with your commentary, original post embedded)
+- **Inspiration / Industry** -- choose between Post Now (standalone) or Reshare (repost with embedded original)

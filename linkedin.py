@@ -144,6 +144,11 @@ _POST_URL_RE = re.compile(
     r"(?:posts/|feed/update/urn:li:activity:)"
 )
 
+_ACTIVITY_ID_RE = re.compile(r"activity[:-](\d+)")
+_UGCPOST_ID_RE = re.compile(r"ugcPost[:-](\d+)")
+
+LINKEDIN_REST_URL = "https://api.linkedin.com/rest"
+
 
 def _extract_post_url_from_citations(response) -> Optional[str]:
     """Extract a real LinkedIn post URL from web search citation annotations."""
@@ -303,6 +308,63 @@ def post_to_linkedin(text: str, asset_urns: Optional[list[str]] = None) -> Optio
         return post_urn
     except requests.HTTPError as e:
         logger.error("Failed to post to LinkedIn: %s — %s", e, resp.text)
+        return None
+
+
+def extract_share_urn(url: str) -> Optional[str]:
+    """
+    Extract a share/ugcPost URN from a LinkedIn post URL.
+    Handles:
+      .../posts/username_topic-activity-7307849264537493504/
+      .../feed/update/urn:li:activity:7307849264537493504/
+      .../posts/username_topic-ugcPost-7434979636482101250-GCD5
+    """
+    match = _ACTIVITY_ID_RE.search(url)
+    if match:
+        return f"urn:li:share:{match.group(1)}"
+    match = _UGCPOST_ID_RE.search(url)
+    if match:
+        return f"urn:li:ugcPost:{match.group(1)}"
+    return None
+
+
+def _rest_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {config.LINKEDIN_ACCESS_TOKEN}",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Linkedin-Version": "202601",
+        "Content-Type": "application/json",
+    }
+
+
+def reshare_to_linkedin(text: str, share_urn: str) -> Optional[str]:
+    """Reshare (repost) an existing LinkedIn post with commentary using the Posts API."""
+    member_urn = f"urn:li:person:{config.LINKEDIN_MEMBER_ID}"
+    payload = {
+        "author": member_urn,
+        "commentary": text,
+        "visibility": "PUBLIC",
+        "distribution": {
+            "feedDistribution": "MAIN_FEED",
+            "targetEntities": [],
+            "thirdPartyDistributionChannels": [],
+        },
+        "lifecycleState": "PUBLISHED",
+        "isReshareDisabledByAuthor": False,
+        "reshareContext": {"parent": share_urn},
+    }
+
+    try:
+        resp = requests.post(
+            f"{LINKEDIN_REST_URL}/posts",
+            headers=_rest_headers(), json=payload, timeout=15,
+        )
+        resp.raise_for_status()
+        post_urn = resp.headers.get("x-restli-id") or resp.json().get("id")
+        logger.info("Reshared to LinkedIn. URN: %s (parent: %s)", post_urn, share_urn)
+        return post_urn
+    except requests.HTTPError as e:
+        logger.error("Failed to reshare on LinkedIn: %s — %s", e, resp.text)
         return None
 
 

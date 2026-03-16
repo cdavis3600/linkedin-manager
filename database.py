@@ -126,12 +126,17 @@ def get_variant(source_post_id: str, variant_type: str) -> Optional[str]:
 
 def update_variant(source_post_id: str, variant_type: str, content: str):
     with get_connection() as conn:
-        conn.execute(
-            """INSERT OR REPLACE INTO post_variants
-               (source_post_id, variant_type, content)
-               VALUES (?, ?, ?)""",
-            (source_post_id, variant_type, content)
+        cursor = conn.execute(
+            """UPDATE post_variants SET content = ?
+               WHERE source_post_id = ? AND variant_type = ?""",
+            (content, source_post_id, variant_type)
         )
+        if cursor.rowcount == 0:
+            conn.execute(
+                """INSERT INTO post_variants (source_post_id, variant_type, content)
+                   VALUES (?, ?, ?)""",
+                (source_post_id, variant_type, content)
+            )
 
 
 def mark_post_status(source_post_id: str, status: str,
