@@ -209,10 +209,16 @@ class UnifiedApprovalView(discord.ui.View):
             mark_post_status(self.source_post_id, "posted", posted_urn=result)
             await interaction.followup.send("✅ Reshared to LinkedIn successfully.")
         else:
-            mark_post_status(self.source_post_id, "failed")
             await interaction.followup.send(
-                "❌ Reshare failed. Try **Post Now** instead for a standalone post."
+                "⚠️ Reshare not supported for this post. Posting as standalone instead…"
             )
+            update_variant(self.source_post_id, "post", post_text)
+            standalone = await self.on_post(self.source_post_id, "post")
+            if standalone:
+                await interaction.followup.send("✅ Posted to LinkedIn as standalone.")
+            else:
+                mark_post_status(self.source_post_id, "failed")
+                await interaction.followup.send("❌ Standalone post also failed. Check logs.")
 
     async def _post_now_callback(self, interaction: discord.Interaction):
         if self.acted:

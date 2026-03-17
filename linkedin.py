@@ -540,12 +540,36 @@ def _build_reshare_payload(text: str, member_urn: str, parent_urn: str) -> dict:
     }
 
 
+def _resolve_activity_urn(activity_urn: str) -> Optional[str]:
+    """Look up an activity URN via the Posts API to get the real post URN."""
+    try:
+        encoded = requests.utils.quote(activity_urn, safe="")
+        resp = requests.get(
+            f"{LINKEDIN_REST_URL}/posts/{encoded}",
+            headers=_rest_headers(), timeout=10,
+        )
+        resp.raise_for_status()
+        post_id = resp.json().get("id")
+        if post_id and "activity" not in post_id:
+            logger.info("Resolved %s → %s", activity_urn, post_id)
+            return post_id
+    except Exception as e:
+        logger.debug("Could not resolve %s via API: %s", activity_urn, e)
+    return None
+
+
 def reshare_to_linkedin(text: str, share_urn: str) -> Optional[str]:
     """
     Reshare an existing LinkedIn post with commentary using the Posts API.
     Tries multiple URN formats if the first attempt gets a 403 or 422.
     """
     member_urn = f"urn:li:person:{config.LINKEDIN_MEMBER_ID}"
+
+    # If the URN is an activity, try to resolve the real post URN first
+    if ":activity:" in share_urn:
+        resolved = _resolve_activity_urn(share_urn)
+        if resolved:
+            share_urn = resolved
 
     _id_match = re.search(r"urn:li:\w+:(\d+)", share_urn)
     if not _id_match:
@@ -557,7 +581,6 @@ def reshare_to_linkedin(text: str, share_urn: str) -> Optional[str]:
         share_urn,
         f"urn:li:ugcPost:{numeric_id}",
         f"urn:li:share:{numeric_id}",
-        f"urn:li:activity:{numeric_id}",
     ]
     seen = set()
     unique_urns = [u for u in urn_formats if u not in seen and not seen.add(u)]
