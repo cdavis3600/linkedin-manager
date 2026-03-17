@@ -503,18 +503,15 @@ def post_to_linkedin(text: str, asset_urns: Optional[list[str]] = None) -> Optio
 
 def extract_share_urn(url: str) -> Optional[str]:
     """
-    Extract a share/ugcPost URN from a LinkedIn post URL.
-    Handles:
-      .../posts/username_topic-activity-7307849264537493504/
-      .../feed/update/urn:li:activity:7307849264537493504/
-      .../posts/username_topic-ugcPost-7434979636482101250-GCD5
+    Extract a post URN from a LinkedIn post URL.
+    Returns urn:li:ugcPost:ID for ugcPost URLs, urn:li:activity:ID for activity URLs.
     """
-    match = _ACTIVITY_ID_RE.search(url)
-    if match:
-        return f"urn:li:ugcPost:{match.group(1)}"
     match = _UGCPOST_ID_RE.search(url)
     if match:
         return f"urn:li:ugcPost:{match.group(1)}"
+    match = _ACTIVITY_ID_RE.search(url)
+    if match:
+        return f"urn:li:activity:{match.group(1)}"
     return None
 
 
@@ -527,10 +524,8 @@ def _rest_headers() -> dict:
     }
 
 
-def reshare_to_linkedin(text: str, share_urn: str) -> Optional[str]:
-    """Reshare (repost) an existing LinkedIn post with commentary using the Posts API."""
-    member_urn = f"urn:li:person:{config.LINKEDIN_MEMBER_ID}"
-    payload = {
+def _build_reshare_payload(text: str, member_urn: str, parent_urn: str) -> dict:
+    return {
         "author": member_urn,
         "commentary": text,
         "visibility": "PUBLIC",
@@ -541,21 +536,50 @@ def reshare_to_linkedin(text: str, share_urn: str) -> Optional[str]:
         },
         "lifecycleState": "PUBLISHED",
         "isReshareDisabledByAuthor": False,
-        "reshareContext": {"parent": share_urn},
+        "reshareContext": {"parent": parent_urn},
     }
 
-    try:
-        resp = requests.post(
-            f"{LINKEDIN_REST_URL}/posts",
-            headers=_rest_headers(), json=payload, timeout=15,
-        )
-        resp.raise_for_status()
-        post_urn = resp.headers.get("x-restli-id") or resp.json().get("id")
-        logger.info("Reshared to LinkedIn. URN: %s (parent: %s)", post_urn, share_urn)
-        return post_urn
-    except requests.HTTPError as e:
-        logger.error("Failed to reshare on LinkedIn: %s — %s", e, resp.text)
+
+def reshare_to_linkedin(text: str, share_urn: str) -> Optional[str]:
+    """
+    Reshare an existing LinkedIn post with commentary using the Posts API.
+    Tries multiple URN formats if the first attempt gets a 403.
+    """
+    member_urn = f"urn:li:person:{config.LINKEDIN_MEMBER_ID}"
+
+    _id_match = re.search(r"urn:li:\w+:(\d+)", share_urn)
+    if not _id_match:
+        logger.error("Invalid URN format: %s", share_urn)
         return None
+    numeric_id = _id_match.group(1)
+
+    urn_formats = [
+        share_urn,
+        f"urn:li:ugcPost:{numeric_id}",
+        f"urn:li:share:{numeric_id}",
+        f"urn:li:activity:{numeric_id}",
+    ]
+    seen = set()
+    unique_urns = [u for u in urn_formats if u not in seen and not seen.add(u)]
+
+    for urn in unique_urns:
+        payload = _build_reshare_payload(text, member_urn, urn)
+        try:
+            resp = requests.post(
+                f"{LINKEDIN_REST_URL}/posts",
+                headers=_rest_headers(), json=payload, timeout=15,
+            )
+            resp.raise_for_status()
+            post_urn = resp.headers.get("x-restli-id") or resp.json().get("id")
+            logger.info("Reshared to LinkedIn. URN: %s (parent: %s)", post_urn, urn)
+            return post_urn
+        except requests.HTTPError as e:
+            logger.warning("Reshare failed with %s: %s — %s", urn, e, resp.text[:200])
+            if resp.status_code != 403:
+                break
+
+    logger.error("All reshare URN formats failed for ID %s", numeric_id)
+    return None
 
 
 def get_member_id(access_token: str) -> Optional[str]:
