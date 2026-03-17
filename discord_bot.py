@@ -648,6 +648,17 @@ def register_commands(bot: LinkedInBot):
         lines = [f"⏳ `{p['source_post_id'][:40]}`" for p in pending]
         await ctx.send("**Pending approval:**\n" + "\n".join(lines))
 
+    @bot.command(name="skipall")
+    async def skipall_cmd(ctx):
+        """!skipall — skip all pending posts."""
+        pending = get_pending_posts()
+        if not pending:
+            await ctx.send("No pending posts to skip.")
+            return
+        for p in pending:
+            mark_post_status(p["source_post_id"], "skipped")
+        await ctx.send(f"Skipped {len(pending)} pending post(s).")
+
     @bot.command(name="inspire")
     async def inspire_cmd(ctx, *, arg: str = ""):
         """

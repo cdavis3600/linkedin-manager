@@ -147,6 +147,11 @@ async def run_pipeline(bot):
             return
         insert_post(composite_id, source_text, datetime.now(timezone.utc).isoformat())
 
+    # Mark individual source posts that won't get their own approval message
+    for p in new_posts:
+        if p["id"] != composite_id:
+            mark_post_status(p["id"], "sourced")
+
     # 4. Download media from all selected source posts
     local_media = []
     for p in new_posts:

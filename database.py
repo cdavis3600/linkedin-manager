@@ -30,7 +30,7 @@ def init_db():
                 source_text TEXT,
                 fetched_at TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
-                -- status: pending | approved | posted | skipped | failed
+                -- status: pending | approved | posted | skipped | failed | sourced
                 approved_variant TEXT,
                 posted_at TEXT,
                 posted_urn TEXT,
