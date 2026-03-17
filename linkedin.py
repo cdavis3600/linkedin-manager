@@ -511,7 +511,7 @@ def extract_share_urn(url: str) -> Optional[str]:
     """
     match = _ACTIVITY_ID_RE.search(url)
     if match:
-        return f"urn:li:share:{match.group(1)}"
+        return f"urn:li:ugcPost:{match.group(1)}"
     match = _UGCPOST_ID_RE.search(url)
     if match:
         return f"urn:li:ugcPost:{match.group(1)}"
