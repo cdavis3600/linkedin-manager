@@ -1,0 +1,5 @@
+BACKLOG
+- remove m-dashes - do not allow them in responses. 
+- @ tags not being applied on post when category selected. (preview appendeds post befor approve)
+- Add tom bowers to the list
+- LinkedIn API does not allow resharing company/organization posts from a personal account. Activity URNs from company post URLs cannot be resolved to ugcPost/share URNs via the API. Current workaround: auto-fallback to standalone post when reshare fails.

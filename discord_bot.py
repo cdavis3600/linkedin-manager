@@ -2,17 +2,20 @@
 discord_bot.py — Discord bot for LinkedIn post approval workflow.
 
 Flow:
-  1. Bot sends an embed with the generated post + single-step action buttons.
-  2. User picks from one screen: Reshare / Post Now / Regenerate / Skip
-     (+ optional tag dropdown, placeholder for now).
+  1. Bot sends an embed with the generated post + Step 1 action buttons.
+  2. User picks: Share / Reshare / Regenerate / Skip.
+  3. Share and Reshare open a Step 2 confirmation view where the user can
+     optionally attach a photo (Share only) and tag teammates (placeholder).
 """
 import asyncio
 import hashlib
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timezone
 
+import aiohttp
 import discord
 from discord.ext import commands
 from typing import Callable, Awaitable, Optional
@@ -116,83 +119,166 @@ class TagPlaceholderSelect(discord.ui.Select):
 
 
 # ─────────────────────────────────────────────
-#  Unified Approval View (single-step)
+#  Step 2 — Share Confirmation (tags + photo + post)
 # ─────────────────────────────────────────────
 
-class UnifiedApprovalView(discord.ui.View):
-    """
-    Single-step approval: tag dropdown + Reshare / Post Now / Regenerate / Skip.
-    Reshare button only appears when a valid share URN exists.
-    """
+class ShareConfirmView(discord.ui.View):
+    """Step 2 for Share: optional photo upload, tags placeholder, then post."""
 
     def __init__(
         self,
+        bot: "LinkedInBot",
         source_post_id: str,
-        source_text: str,
         post_text: str,
-        source_type: str,
         on_post_callback: Callable[[str, str], Awaitable[None]],
-        timeout: float = 3600 * 12,
-        source_urls: list[str] | None = None,
+        timeout: float = 3600,
     ):
         super().__init__(timeout=timeout)
+        self.bot = bot
         self.source_post_id = source_post_id
-        self.source_text = source_text
         self.post_text = post_text
-        self.source_type = source_type
         self.on_post = on_post_callback
-        self.source_urls = source_urls or []
+        self.photo_path: Optional[str] = None
         self.acted = False
-
-        from linkedin import extract_share_urn
-        self._share_urn = None
-        for url in self.source_urls:
-            urn = extract_share_urn(url)
-            if urn:
-                self._share_urn = urn
-                break
 
         if config.TEAM_MEMBERS:
             self.add_item(TagPlaceholderSelect(config.TEAM_MEMBERS, row=0))
 
         btn_row = 1 if config.TEAM_MEMBERS else 0
 
-        if self._share_urn:
-            reshare_btn = discord.ui.Button(
-                label="🔄 Reshare", style=discord.ButtonStyle.primary, row=btn_row,
-            )
-            reshare_btn.callback = self._reshare_callback
-            self.add_item(reshare_btn)
+        photo_btn = discord.ui.Button(
+            label="📷 Add Photo", style=discord.ButtonStyle.secondary, row=btn_row,
+        )
+        photo_btn.callback = self._photo_callback
+        self.add_item(photo_btn)
 
         post_btn = discord.ui.Button(
-            label="📤 Post Now", style=discord.ButtonStyle.success, row=btn_row,
+            label="📤 Post", style=discord.ButtonStyle.success, row=btn_row,
         )
-        post_btn.callback = self._post_now_callback
+        post_btn.callback = self._post_callback
         self.add_item(post_btn)
 
-        regen_btn = discord.ui.Button(
-            label="✏️ Regenerate", style=discord.ButtonStyle.secondary, row=btn_row,
+    async def _photo_callback(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "📷 Upload an image in this channel now. I'll attach it to the post.",
+            ephemeral=True,
         )
-        regen_btn.callback = self._regenerate_callback
-        self.add_item(regen_btn)
 
-        skip_btn = discord.ui.Button(
-            label="⏭ Skip", style=discord.ButtonStyle.danger, row=btn_row,
-        )
-        skip_btn.callback = self._skip_callback
-        self.add_item(skip_btn)
+        def check(m: discord.Message):
+            return (
+                m.author == interaction.user
+                and m.channel == interaction.channel
+                and m.attachments
+            )
 
-    async def _disable_all(self, interaction: discord.Interaction):
+        try:
+            msg = await self.bot.wait_for("message", check=check, timeout=120)
+            attachment = msg.attachments[0]
+            media_dir = os.path.join(config.MEDIA_DIR, self.source_post_id[:40])
+            os.makedirs(media_dir, exist_ok=True)
+            ext = os.path.splitext(attachment.filename)[1] or ".png"
+            local_path = os.path.join(media_dir, f"user_upload{ext}")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(attachment.url) as resp:
+                    with open(local_path, "wb") as f:
+                        f.write(await resp.read())
+
+            self.photo_path = local_path
+            await msg.add_reaction("✅")
+            await interaction.followup.send(
+                f"✅ Photo attached: **{attachment.filename}**. Click **Post** when ready.",
+                ephemeral=True,
+            )
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                "⏰ Timed out waiting for image. Click **Add Photo** to try again.",
+                ephemeral=True,
+            )
+
+    async def _post_callback(self, interaction: discord.Interaction):
+        if self.acted:
+            await interaction.response.send_message("Already posting.", ephemeral=True)
+            return
+        self.acted = True
         for item in self.children:
             item.disabled = True
         await interaction.message.edit(view=self)
 
+        post_text = get_variant(self.source_post_id, "post") or self.post_text
+        update_variant(self.source_post_id, "post", post_text)
+        mark_post_status(self.source_post_id, "approved", approved_variant="post")
+
+        if self.photo_path:
+            await interaction.response.send_message(
+                "🚀 Uploading photo & posting to LinkedIn...", ephemeral=False,
+            )
+            from linkedin import upload_image_to_linkedin, post_to_linkedin
+            asset_urn = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: upload_image_to_linkedin(self.photo_path)
+            )
+            asset_urns = [asset_urn] if asset_urn else None
+            post_urn = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: post_to_linkedin(post_text, asset_urns)
+            )
+            if post_urn:
+                mark_post_status(self.source_post_id, "posted", posted_urn=post_urn)
+                await interaction.followup.send("✅ Posted to LinkedIn with photo.")
+            else:
+                mark_post_status(self.source_post_id, "failed")
+                await interaction.followup.send("❌ Failed to post. Check logs.")
+        else:
+            await interaction.response.send_message(
+                "🚀 Posting to LinkedIn...", ephemeral=False,
+            )
+            result = await self.on_post(self.source_post_id, "post")
+            if result:
+                await interaction.followup.send("✅ Posted to LinkedIn successfully.")
+            else:
+                await interaction.followup.send("❌ Failed to post. Check logs.")
+
+
+# ─────────────────────────────────────────────
+#  Step 2 — Reshare Confirmation (tags + reshare)
+# ─────────────────────────────────────────────
+
+class ReshareConfirmView(discord.ui.View):
+    """Step 2 for Reshare: tags placeholder, then reshare."""
+
+    def __init__(
+        self,
+        source_post_id: str,
+        post_text: str,
+        share_urn: str,
+        on_post_callback: Callable[[str, str], Awaitable[None]],
+        timeout: float = 3600,
+    ):
+        super().__init__(timeout=timeout)
+        self.source_post_id = source_post_id
+        self.post_text = post_text
+        self._share_urn = share_urn
+        self.on_post = on_post_callback
+        self.acted = False
+
+        if config.TEAM_MEMBERS:
+            self.add_item(TagPlaceholderSelect(config.TEAM_MEMBERS, row=0))
+
+        btn_row = 1 if config.TEAM_MEMBERS else 0
+
+        reshare_btn = discord.ui.Button(
+            label="🔄 Reshare", style=discord.ButtonStyle.primary, row=btn_row,
+        )
+        reshare_btn.callback = self._reshare_callback
+        self.add_item(reshare_btn)
+
     async def _reshare_callback(self, interaction: discord.Interaction):
         if self.acted:
-            await interaction.response.send_message("Already handled.", ephemeral=True)
+            await interaction.response.send_message("Already handling.", ephemeral=True)
             return
         self.acted = True
-        await self._disable_all(interaction)
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
 
         from rewriter import strip_credit_line
         from linkedin import reshare_to_linkedin
@@ -220,23 +306,113 @@ class UnifiedApprovalView(discord.ui.View):
                 mark_post_status(self.source_post_id, "failed")
                 await interaction.followup.send("❌ Standalone post also failed. Check logs.")
 
-    async def _post_now_callback(self, interaction: discord.Interaction):
+
+# ─────────────────────────────────────────────
+#  Step 1 — Approval View (choose action)
+# ─────────────────────────────────────────────
+
+class UnifiedApprovalView(discord.ui.View):
+    """
+    Step 1: Share / Reshare / Regenerate / Skip.
+    Share and Reshare open a Step 2 confirmation view.
+    """
+
+    def __init__(
+        self,
+        bot: "LinkedInBot",
+        source_post_id: str,
+        source_text: str,
+        post_text: str,
+        source_type: str,
+        on_post_callback: Callable[[str, str], Awaitable[None]],
+        timeout: float = 3600 * 12,
+        source_urls: list[str] | None = None,
+    ):
+        super().__init__(timeout=timeout)
+        self.bot = bot
+        self.source_post_id = source_post_id
+        self.source_text = source_text
+        self.post_text = post_text
+        self.source_type = source_type
+        self.on_post = on_post_callback
+        self.source_urls = source_urls or []
+        self.acted = False
+
+        from linkedin import extract_share_urn
+        self._share_urn = None
+        for url in self.source_urls:
+            urn = extract_share_urn(url)
+            if urn:
+                self._share_urn = urn
+                break
+
+        btn_row = 0
+
+        if self._share_urn:
+            reshare_btn = discord.ui.Button(
+                label="🔄 Reshare", style=discord.ButtonStyle.primary, row=btn_row,
+            )
+            reshare_btn.callback = self._reshare_callback
+            self.add_item(reshare_btn)
+
+        share_btn = discord.ui.Button(
+            label="📤 Share", style=discord.ButtonStyle.success, row=btn_row,
+        )
+        share_btn.callback = self._share_callback
+        self.add_item(share_btn)
+
+        regen_btn = discord.ui.Button(
+            label="✏️ Regenerate", style=discord.ButtonStyle.secondary, row=btn_row,
+        )
+        regen_btn.callback = self._regenerate_callback
+        self.add_item(regen_btn)
+
+        skip_btn = discord.ui.Button(
+            label="⏭ Skip", style=discord.ButtonStyle.danger, row=btn_row,
+        )
+        skip_btn.callback = self._skip_callback
+        self.add_item(skip_btn)
+
+    async def _disable_all(self, interaction: discord.Interaction):
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+
+    async def _share_callback(self, interaction: discord.Interaction):
         if self.acted:
             await interaction.response.send_message("Already handled.", ephemeral=True)
             return
         self.acted = True
         await self._disable_all(interaction)
 
-        post_text = get_variant(self.source_post_id, "post") or self.post_text
-        update_variant(self.source_post_id, "post", post_text)
-        mark_post_status(self.source_post_id, "approved", approved_variant="post")
+        view = ShareConfirmView(
+            bot=self.bot,
+            source_post_id=self.source_post_id,
+            post_text=self.post_text,
+            on_post_callback=self.on_post,
+        )
+        await interaction.response.send_message(
+            "**Step 2 — Confirm Share**\nOptionally add a photo, then click **Post**.",
+            view=view,
+        )
 
-        await interaction.response.send_message("🚀 Posting to LinkedIn...", ephemeral=False)
-        result = await self.on_post(self.source_post_id, "post")
-        if result:
-            await interaction.followup.send("✅ Posted to LinkedIn successfully.")
-        else:
-            await interaction.followup.send("❌ Failed to post to LinkedIn. Check logs.")
+    async def _reshare_callback(self, interaction: discord.Interaction):
+        if self.acted:
+            await interaction.response.send_message("Already handled.", ephemeral=True)
+            return
+        self.acted = True
+        await self._disable_all(interaction)
+
+        view = ReshareConfirmView(
+            source_post_id=self.source_post_id,
+            post_text=self.post_text,
+            share_urn=self._share_urn,
+            on_post_callback=self.on_post,
+        )
+        await interaction.response.send_message(
+            "**Step 2 — Confirm Reshare**\nClick **Reshare** to proceed.",
+            view=view,
+        )
 
     async def _regenerate_callback(self, interaction: discord.Interaction):
         if self.acted:
@@ -323,6 +499,7 @@ class RegenerateModal(discord.ui.Modal, title="Regenerate Post"):
         embed.set_footer(text=f"Feedback: {user_feedback}")
 
         confirm_view = UnifiedApprovalView(
+            bot=self.parent_view.bot,
             source_post_id=self.source_post_id,
             source_text=self.source_text,
             post_text=new_text,
@@ -474,6 +651,7 @@ async def send_approval_message(
     embed.set_footer(text=" • ".join(footer_parts))
 
     view = UnifiedApprovalView(
+        bot=bot,
         source_post_id=source_post_id,
         source_text=source_text,
         post_text=post_text,
