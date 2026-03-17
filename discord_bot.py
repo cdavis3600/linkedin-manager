@@ -308,6 +308,60 @@ class ReshareConfirmView(discord.ui.View):
 
 
 # ─────────────────────────────────────────────
+#  Source Type Picker (shown before generation)
+# ─────────────────────────────────────────────
+
+class SourceTypeView(discord.ui.View):
+    """Prompt user to pick the post type before AI generation."""
+
+    def __init__(
+        self,
+        bot: "LinkedInBot",
+        source_text: str,
+        author_name: str = "",
+        source_url: str = "",
+        post_url: str = "",
+        reply_target=None,
+        timeout: float = 300,
+    ):
+        super().__init__(timeout=timeout)
+        self.bot = bot
+        self.source_text = source_text
+        self.author_name = author_name
+        self.source_url = source_url
+        self.post_url = post_url
+        self.reply_target = reply_target
+        self.acted = False
+
+        for key, label in SOURCE_TYPE_LABELS.items():
+            btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
+            btn.callback = self._make_callback(key)
+            self.add_item(btn)
+
+    def _make_callback(self, source_type: str):
+        async def callback(interaction: discord.Interaction):
+            if self.acted:
+                await interaction.response.send_message("Already picked.", ephemeral=True)
+                return
+            self.acted = True
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(view=self)
+            await interaction.response.defer()
+
+            await _run_inspire_pipeline(
+                reply_target=self.reply_target,
+                bot=self.bot,
+                source_text=self.source_text,
+                author_name=self.author_name,
+                source_url=self.source_url,
+                post_url=self.post_url,
+                source_type=source_type,
+            )
+        return callback
+
+
+# ─────────────────────────────────────────────
 #  Step 1 — Approval View (choose action)
 # ─────────────────────────────────────────────
 
@@ -552,8 +606,8 @@ class LinkedInBot(commands.Bot):
             if reaction:
                 logger.info("User reaction hint: %s", reaction)
 
-            await message.channel.send(
-                "💡 Spotted a LinkedIn link — generating an inspiration post…"
+            status = await message.channel.send(
+                "💡 Spotted a LinkedIn link — fetching post…"
             )
             from linkedin import fetch_posts_from_url
             try:
@@ -561,26 +615,29 @@ class LinkedInBot(commands.Bot):
                     None, lambda: fetch_posts_from_url(linkedin_url, hours_back=0)
                 )
             except Exception as e:
-                await message.channel.send(f"❌ Fetch failed: {e}")
+                await status.edit(content=f"❌ Fetch failed: {e}")
                 return
 
             if posts:
                 post = posts[0]
-                # Prepend CJ's reaction as context so the rewriter picks up his angle
                 source_text = post["text"]
                 if reaction:
                     source_text = f"[CJ's reaction: {reaction}]\n\n{source_text}"
-                await _run_inspire_pipeline(
-                    reply_target=message,
+                await status.delete()
+                view = SourceTypeView(
                     bot=self,
                     source_text=source_text,
                     author_name=post.get("author_name", ""),
                     source_url=linkedin_url,
                     post_url=post.get("post_url", linkedin_url),
+                    reply_target=message,
+                )
+                await message.channel.send(
+                    "**What type of post is this?**", view=view,
                 )
             else:
-                await message.channel.send(
-                    "⚠️ Couldn't pull the post text automatically. "
+                await status.edit(
+                    content="⚠️ Couldn't pull the post text automatically. "
                     "Try `!inspire` and paste the text manually."
                 )
             return  # Don't process as a command
@@ -679,9 +736,10 @@ async def _run_inspire_pipeline(
     author_name: str = "",
     source_url: str = "",   # LinkedIn profile/company page
     post_url: str = "",     # direct link to the specific post
+    source_type: str = "inspiration",
 ) -> None:
     """
-    Generate an inspiration post from source_text and send it to the
+    Generate a post from source_text and send it to the
     approval channel, same as the scheduled pipeline.
     Works for both fetched URLs and pasted text.
     """
@@ -707,7 +765,7 @@ async def _run_inspire_pipeline(
             None,
             lambda: generate_post(
                 source_text,
-                source_type="inspiration",
+                source_type=source_type,
                 post_urls=[post_url] if post_url else [],
                 author_names=[author_name] if author_name else [],
                 source_urls=[source_url] if source_url else [],
@@ -730,7 +788,7 @@ async def _run_inspire_pipeline(
         source_post_id=post_id,
         source_text=source_text,
         post_text=post_text,
-        source_type="inspiration",
+        source_type=source_type,
         summary=summary,
         source_urls=[post_url or source_url] if (post_url or source_url) else [],
         source_authors=[author_name] if author_name else [],
@@ -768,13 +826,19 @@ class InspirationInputModal(discord.ui.Modal, title="Repost with My Thoughts"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        await _run_inspire_pipeline(
-            reply_target=interaction.message or interaction,
+        reply_target = interaction.message or interaction
+        view = SourceTypeView(
             bot=self._bot,
             source_text=self.post_content.value.strip(),
             author_name=self.author_name.value.strip(),
             source_url=self.source_url.value.strip(),
+            reply_target=reply_target,
         )
+        channel = getattr(reply_target, "channel", None)
+        if channel:
+            await channel.send("**What type of post is this?**", view=view)
+        else:
+            await interaction.followup.send("**What type of post is this?**", view=view)
 
     # Give the modal somewhere to send status updates when reply_target
     # is an Interaction (which has no .channel directly after defer)
@@ -883,22 +947,24 @@ def register_commands(bot: LinkedInBot):
 
             post = posts[0]
             await status.delete()
-            await _run_inspire_pipeline(
-                reply_target=ctx,
+            view = SourceTypeView(
                 bot=bot,
                 source_text=post["text"],
                 author_name=post.get("author_name", ""),
                 source_url=arg,
                 post_url=post.get("post_url", arg),
+                reply_target=ctx,
             )
+            await ctx.send("**What type of post is this?**", view=view)
             return
 
         # Plain text pasted directly into the command
-        await _run_inspire_pipeline(
-            reply_target=ctx,
+        view = SourceTypeView(
             bot=bot,
             source_text=arg,
+            reply_target=ctx,
         )
+        await ctx.send("**What type of post is this?**", view=view)
 
     @bot.command(name="team")
     async def team_cmd(ctx):
