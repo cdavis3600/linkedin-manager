@@ -543,7 +543,7 @@ def _build_reshare_payload(text: str, member_urn: str, parent_urn: str) -> dict:
 def reshare_to_linkedin(text: str, share_urn: str) -> Optional[str]:
     """
     Reshare an existing LinkedIn post with commentary using the Posts API.
-    Tries multiple URN formats if the first attempt gets a 403.
+    Tries multiple URN formats if the first attempt gets a 403 or 422.
     """
     member_urn = f"urn:li:person:{config.LINKEDIN_MEMBER_ID}"
 
@@ -575,7 +575,7 @@ def reshare_to_linkedin(text: str, share_urn: str) -> Optional[str]:
             return post_urn
         except requests.HTTPError as e:
             logger.warning("Reshare failed with %s: %s — %s", urn, e, resp.text[:200])
-            if resp.status_code != 403:
+            if resp.status_code not in (403, 422):
                 break
 
     logger.error("All reshare URN formats failed for ID %s", numeric_id)
