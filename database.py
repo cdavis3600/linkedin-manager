@@ -87,7 +87,7 @@ def set_setting(key: str, value: str) -> None:
 def is_post_processed(source_post_id: str) -> bool:
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id FROM processed_posts WHERE source_post_id = ?",
+            "SELECT id FROM processed_posts WHERE source_post_id = ? AND status NOT IN ('skipped', 'failed')",
             (source_post_id,)
         ).fetchone()
         return row is not None
