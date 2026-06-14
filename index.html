@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fayetteville MTB Trails · Sort by Difficulty</title>
+    <meta
+      name="description"
+      content="Browse and sort mountain bike trails in Fayetteville, Arkansas by difficulty, with an interactive map."
+    />
+
+    <!-- Leaflet (open-source map, no API key required) -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1><span class="pin">▲</span> Fayetteville MTB Trails</h1>
+      <p>Mountain bike trails in Fayetteville, Arkansas — sorted by how hard you want to ride.</p>
+    </header>
+
+    <div class="controls">
+      <div class="control">
+        <label for="sort">Sort by</label>
+        <select id="sort">
+          <option value="difficulty-asc">Difficulty · Easy → Hard</option>
+          <option value="difficulty-desc">Difficulty · Hard → Easy</option>
+          <option value="length-asc">Length · Short → Long</option>
+          <option value="length-desc">Length · Long → Short</option>
+          <option value="name-asc">Name · A → Z</option>
+        </select>
+      </div>
+
+      <div class="control">
+        <label>Filter difficulty</label>
+        <div class="filter-pills" id="filter-pills"></div>
+      </div>
+
+      <div class="control">
+        <label>&nbsp;</label>
+        <button class="pill" id="show-all">Show all</button>
+      </div>
+    </div>
+
+    <div class="layout">
+      <section class="list-panel">
+        <p class="list-count" id="list-count"></p>
+        <div id="trail-list"></div>
+      </section>
+      <div id="map"></div>
+    </div>
+
+    <footer>
+      Trailhead locations are approximate — verify on
+      <a href="https://www.trailforks.com/region/fayetteville/" target="_blank" rel="noopener">Trailforks</a>
+      or
+      <a href="https://www.mtbproject.com/directory/8009548/fayetteville-ar" target="_blank" rel="noopener">MTB Project</a>
+      before riding. Map data &copy; OpenStreetMap contributors.
+    </footer>
+
+    <!-- Leaflet JS -->
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="trails.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
